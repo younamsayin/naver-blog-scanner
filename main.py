@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.0-flash"
 FIRST_RUN_LOOKBACK_DAYS = 3
+DEFAULT_CONTENT_CHAR_LIMIT = 12000
 
 # ─── Mobile browser header ────────────────────────────────────────────────────
 HEADERS = {
@@ -79,6 +80,7 @@ def load_config() -> dict:
         "tg_token":   os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "tg_chat":    os.getenv("TELEGRAM_CHAT_ID", ""),
         "llm_model":  os.getenv("LLM_MODEL", DEFAULT_MODEL),
+        "content_char_limit": os.getenv("CONTENT_CHAR_LIMIT", str(DEFAULT_CONTENT_CHAR_LIMIT)),
     }
     missing = [
         k for k in ("gemini_key", "tg_token", "tg_chat")
@@ -93,6 +95,24 @@ def load_config() -> dict:
             "  ./venv/bin/python3 main.py run",
             CONFIG_FILE,
             missing,
+        )
+        sys.exit(1)
+
+    try:
+        cfg["content_char_limit"] = int(cfg["content_char_limit"])
+    except ValueError:
+        log.error(
+            "CONTENT_CHAR_LIMIT in %s must be an integer. Current value: %r",
+            CONFIG_FILE,
+            cfg["content_char_limit"],
+        )
+        sys.exit(1)
+
+    if cfg["content_char_limit"] <= 0:
+        log.error(
+            "CONTENT_CHAR_LIMIT in %s must be greater than 0. Current value: %r",
+            CONFIG_FILE,
+            cfg["content_char_limit"],
         )
         sys.exit(1)
     return cfg
@@ -275,6 +295,7 @@ def summarize(
     prompt_template: str,
     gemini_key: str,
     model_name: str,
+    content_char_limit: int,
 ) -> str:
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel(model_name)
@@ -284,7 +305,7 @@ def summarize(
         f"[Source Data]\n"
         f"Blog: {blog_id}\n"
         f"Title: {title}\n\n"
-        f"Content:\n{content[:12_000]}"      # cap to avoid token limits
+        f"Content:\n{content[:content_char_limit]}"
     )
 
     try:
@@ -414,6 +435,9 @@ def summarize_entry(
             mark_seen(blog_state, post_id)
         return False
 
+    content_char_limit = cfg["content_char_limit"]
+    was_truncated = len(content) > content_char_limit
+
     summary = summarize(
         content,
         post_title,
@@ -421,6 +445,7 @@ def summarize_entry(
         prompt_template,
         cfg["gemini_key"],
         model_name,
+        content_char_limit,
     )
     if not summary:
         log.warning("[%s] Summarization returned empty result.", blog_id)
@@ -429,13 +454,19 @@ def summarize_entry(
     save_summary_file(blog_id, post_title, post_date, post_link, summary)
 
     if send_to_telegram:
+        truncation_note = ""
+        if was_truncated:
+            truncation_note = (
+                "⚠️ *Partial-content summary:* the original post was longer than "
+                f"{content_char_limit:,} characters, so the summary may not cover the full post.\n\n"
+            )
         header = (
             f"📰 *New Post — {blog_id}*\n"
             f"*{post_title}*\n"
             f"🗓 {post_date}\n"
             f"🔗 {post_link}\n\n"
         )
-        send_telegram(header + summary, cfg["tg_token"], cfg["tg_chat"])
+        send_telegram(header + truncation_note + summary, cfg["tg_token"], cfg["tg_chat"])
 
     if blog_state is not None:
         record_summary(blog_state, post_id, post_title, post_link, post_date)
@@ -564,7 +595,7 @@ def test_run(model_name: Optional[str] = None):
         prompt_template,
         cfg,
         model_name,
-        send_to_telegram=False,
+        send_to_telegram=True,
         blog_state=None,
     )
 
@@ -617,7 +648,7 @@ if __name__ == "__main__":
     )
 
     test_parser = subparsers.add_parser(
-        "test", help="Summarize one random post from one blog without sending Telegram"
+        "test", help="Summarize one random post from one blog and send it to Telegram"
     )
     test_parser.add_argument(
         "--model",

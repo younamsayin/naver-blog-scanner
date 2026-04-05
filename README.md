@@ -57,6 +57,14 @@ or
 ./venv/bin/python3 main.py run --model gemini-2.5-flash
 ```
 
+You can also control how much blog text is sent to the LLM:
+
+```bash
+CONTENT_CHAR_LIMIT=12000
+```
+
+If a post is longer than that limit, the Telegram message will include a warning before the summary so you know it may not cover the full article.
+
 ## Run Modes
 
 - Run once immediately:
@@ -77,7 +85,7 @@ or
 ./venv/bin/python3 main.py watch --interval 600
 ```
 
- - Run a one-off test summary from one random post in one blog without sending to Telegram:
+- Run a one-off test summary from one random post in one blog and send it to Telegram:
 
 ```bash
 ./venv/bin/python3 main.py test
