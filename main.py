@@ -7,8 +7,10 @@ summarizes each post with Gemini, saves them locally,
 and sends the summary to Telegram.
 
 Usage:
-  python3 main.py              # normal run (new posts only)
-  python3 main.py --backfill   # also summarize all already-existing posts
+  python3 main.py run                  # scan once right now
+  python3 main.py run --backfill       # also summarize already-existing posts
+  python3 main.py watch                # keep running in the terminal
+  python3 main.py watch --interval 600 # scan every 10 minutes
 """
 
 import os
@@ -381,13 +383,37 @@ def scan(backfill: bool = False):
     log.info("Run complete. New posts processed: %d", total_new)
 
 
+def watch(interval: int, backfill: bool = False):
+    """Run scans continuously until the user stops the process."""
+    run_count = 0
+    log.info("Watch mode started. Scan interval: %d seconds", interval)
+
+    while True:
+        run_count += 1
+        log.info("Starting watch cycle #%d", run_count)
+
+        # Only apply backfill to the first cycle so we do not repeatedly
+        # reprocess old posts while the watcher stays up.
+        scan(backfill=backfill if run_count == 1 else False)
+
+        log.info("Sleeping for %d seconds. Press Ctrl+C to stop.", interval)
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            log.info("Watch mode stopped by user.")
+            break
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Naver Blog Scanner")
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser("run", help="Scan once immediately")
+    run_parser.add_argument(
         "--backfill",
         action="store_true",
         help=(
@@ -395,5 +421,31 @@ if __name__ == "__main__":
             "Default: mark them as seen and only summarize future new posts."
         ),
     )
+
+    watch_parser = subparsers.add_parser(
+        "watch", help="Keep scanning in the terminal at a fixed interval"
+    )
+    watch_parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help=(
+            "Apply backfill only on the first watch cycle. "
+            "Later cycles process new posts only."
+        ),
+    )
+    watch_parser.add_argument(
+        "--interval",
+        type=int,
+        default=900,
+        help="Seconds to wait between scans in watch mode. Default: 900",
+    )
+
     args = parser.parse_args()
-    scan(backfill=args.backfill)
+    command = args.command or "run"
+
+    if command == "watch":
+        if args.interval < 60:
+            parser.error("--interval must be at least 60 seconds")
+        watch(interval=args.interval, backfill=args.backfill)
+    else:
+        scan(backfill=args.backfill)

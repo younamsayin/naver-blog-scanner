@@ -17,14 +17,32 @@ Scans Naver blogs listed in `blogs.txt` for new posts, summarizes each new post 
 2. Install dependencies from `requirements.txt`.
 3. Copy `config.env.example` to `config.env` and fill in the values.
 4. Copy `blogs.example.txt` to `blogs.txt` or edit `blogs.txt` directly.
-5. Run `python3 main.py`.
+5. Run `python3 main.py run` for a one-time scan.
 
 To process existing posts on the first run, use:
 
 ```bash
-python3 main.py --backfill
+python3 main.py run --backfill
 ```
 
-## Automation
+## Run Modes
 
-`setup.sh` installs dependencies, prepares the local folders, and registers a macOS `launchd` job using `com.naverblogscanner.plist` so the scanner can run daily at 9:00 AM.
+- Run once immediately:
+
+```bash
+python3 main.py run
+```
+
+- Keep it running in your terminal and scan every 15 minutes:
+
+```bash
+python3 main.py watch
+```
+
+- Keep it running with a custom interval in seconds:
+
+```bash
+python3 main.py watch --interval 600
+```
+
+`setup.sh` installs dependencies and prepares the local folders. It does not register a scheduled macOS job anymore.

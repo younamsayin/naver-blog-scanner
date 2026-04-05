@@ -6,9 +6,6 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PLIST_SRC="$DIR/com.naverblogscanner.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/com.naverblogscanner.plist"
-
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║      Naver Blog Scanner — Setup          ║"
@@ -30,18 +27,6 @@ echo "    ✅ Dependencies installed."
 # ── 3. Create summaries directory ─────────────────────────────────────────────
 mkdir -p "$DIR/summaries"
 
-# ── 4. Register the daily launchd job ─────────────────────────────────────────
-echo "⏰  Registering daily background job (9:00 AM)..."
-
-# Unload previous version if it exists
-if launchctl list | grep -q "com.naverblogscanner" 2>/dev/null; then
-    launchctl unload "$PLIST_DST" 2>/dev/null || true
-fi
-
-cp "$PLIST_SRC" "$PLIST_DST"
-launchctl load "$PLIST_DST"
-echo "    ✅ Job registered. It will run every day at 9:00 AM."
-
 echo ""
 echo "════════════════════════════════════════════"
 echo "  Setup complete! Next steps:"
@@ -54,12 +39,16 @@ echo ""
 echo "  2. Add your blog URLs to blogs.txt"
 echo "       (one URL per line)"
 echo ""
-echo "  3. Run the first scan manually:"
-echo "       ./venv/bin/python3 main.py"
+echo "  3. Run a one-time scan right away:"
+echo "       ./venv/bin/python3 main.py run"
 echo ""
 echo "     Or to summarize all existing posts too:"
-echo "       ./venv/bin/python3 main.py --backfill"
+echo "       ./venv/bin/python3 main.py run --backfill"
 echo ""
-echo "  4. From then on it runs automatically every day at 9 AM."
+echo "  4. Or keep it running in your terminal:"
+echo "       ./venv/bin/python3 main.py watch"
+echo ""
+echo "     Example with a 10-minute interval:"
+echo "       ./venv/bin/python3 main.py watch --interval 600"
 echo "════════════════════════════════════════════"
 echo ""
