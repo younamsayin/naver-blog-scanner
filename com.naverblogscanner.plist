@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- Unique identifier for this launchd job -->
+    <key>Label</key>
+    <string>com.naverblogscanner</string>
+
+    <!-- Command to run: use the venv Python + main.py -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/venv/bin/python3</string>
+        <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/main.py</string>
+    </array>
+
+    <!-- Run every day at 9:00 AM local time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner</string>
+
+    <!-- Log stdout and stderr to the same scanner.log file -->
+    <key>StandardOutPath</key>
+    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/scanner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/scanner.log</string>
+
+    <!-- Restart automatically if the job crashes -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Run even if the scheduled time was missed (e.g. laptop was asleep) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+</dict>
+</plist>

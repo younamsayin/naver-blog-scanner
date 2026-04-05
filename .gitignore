@@ -1,0 +1,8 @@
+config.env
+blogs.txt
+scanner.log
+state.json
+summaries/
+venv/
+__pycache__/
+.DS_Store
