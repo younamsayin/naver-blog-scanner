@@ -13,16 +13,48 @@ Scans Naver blogs listed in `blogs.txt` for new posts, summarizes each new post 
 
 ## Setup
 
-1. Create and activate a virtual environment.
-2. Install dependencies from `requirements.txt`.
+1. Create the local virtual environment:
+
+```bash
+python3 -m venv venv
+```
+
+2. Install dependencies into the project virtualenv:
+
+```bash
+./venv/bin/pip install -r requirements.txt
+```
+
 3. Copy `config.env.example` to `config.env` and fill in the values.
 4. Copy `blogs.example.txt` to `blogs.txt` or edit `blogs.txt` directly.
-5. Run `python3 main.py run` for a one-time scan.
+5. Run a one-time scan with the project virtualenv:
+
+```bash
+./run.sh
+```
+
+or
+
+```bash
+./venv/bin/python3 main.py run
+```
 
 To process existing posts on the first run, use:
 
 ```bash
-python3 main.py run --backfill
+./venv/bin/python3 main.py run --backfill
+```
+
+You can choose the LLM model in either of two ways:
+
+```bash
+LLM_MODEL=gemini-2.5-flash
+```
+
+or
+
+```bash
+./venv/bin/python3 main.py run --model gemini-2.5-flash
 ```
 
 ## Run Modes
@@ -30,19 +62,33 @@ python3 main.py run --backfill
 - Run once immediately:
 
 ```bash
-python3 main.py run
+./run.sh
 ```
 
 - Keep it running in your terminal and scan every 15 minutes:
 
 ```bash
-python3 main.py watch
+./venv/bin/python3 main.py watch
 ```
 
 - Keep it running with a custom interval in seconds:
 
 ```bash
-python3 main.py watch --interval 600
+./venv/bin/python3 main.py watch --interval 600
+```
+
+ - Run a one-off test summary from one random post in one blog without sending to Telegram:
+
+```bash
+./venv/bin/python3 main.py test
 ```
 
 `setup.sh` installs dependencies and prepares the local folders. It does not register a scheduled macOS job anymore.
+
+Do not use plain `python3 main.py ...` unless you have already activated the virtualenv. Otherwise Python may not find packages like `feedparser`.
+
+## History Behavior
+
+The scanner keeps `state.json` as a history of seen and summarized post IDs so it does not repeat the same post on future runs.
+
+On a blog's first normal run, it does not walk the entire history. It only considers posts from the last 3 days and marks older feed entries as already seen.

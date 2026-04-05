@@ -7,10 +7,12 @@ summarizes each post with Gemini, saves them locally,
 and sends the summary to Telegram.
 
 Usage:
-  python3 main.py run                  # scan once right now
-  python3 main.py run --backfill       # also summarize already-existing posts
-  python3 main.py watch                # keep running in the terminal
-  python3 main.py watch --interval 600 # scan every 10 minutes
+  ./run.sh                             # scan once right now
+  ./venv/bin/python3 main.py run       # scan once right now
+  ./venv/bin/python3 main.py run --backfill
+  ./venv/bin/python3 main.py test      # summarize one random post
+  ./venv/bin/python3 main.py watch
+  ./venv/bin/python3 main.py watch --interval 600
 """
 
 import os
@@ -20,8 +22,11 @@ import json
 import time
 import logging
 import argparse
-from datetime import datetime
+import random
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Optional
 
 import requests
 import feedparser
@@ -50,6 +55,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+DEFAULT_MODEL = "gemini-2.0-flash"
+FIRST_RUN_LOOKBACK_DAYS = 3
+
 # ─── Mobile browser header ────────────────────────────────────────────────────
 HEADERS = {
     "User-Agent": (
@@ -70,12 +78,20 @@ def load_config() -> dict:
         "gemini_key": os.getenv("GEMINI_API_KEY", ""),
         "tg_token":   os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "tg_chat":    os.getenv("TELEGRAM_CHAT_ID", ""),
+        "llm_model":  os.getenv("LLM_MODEL", DEFAULT_MODEL),
     }
-    missing = [k for k, v in cfg.items() if not v or v.startswith("your_")]
+    missing = [
+        k for k in ("gemini_key", "tg_token", "tg_chat")
+        if not cfg[k] or cfg[k].startswith("your_")
+    ]
     if missing:
         log.error(
-            "The following config keys are not set in config.env: %s\n"
-            "Please fill in config.env and try again.",
+            "The following config keys are not set in %s: %s\n"
+            "Fill in the real values in config.env before running the scanner.\n"
+            "Recommended commands:\n"
+            "  ./run.sh\n"
+            "  ./venv/bin/python3 main.py run",
+            CONFIG_FILE,
             missing,
         )
         sys.exit(1)
@@ -88,7 +104,8 @@ def load_config() -> dict:
 
 def load_state() -> dict:
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        raw_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return normalize_state(raw_state)
     return {}
 
 
@@ -96,6 +113,47 @@ def save_state(state: dict):
     STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def normalize_state(raw_state: dict) -> dict:
+    """Upgrade older state formats into a richer per-blog history structure."""
+    normalized = {}
+
+    for blog_id, blog_state in raw_state.items():
+        if isinstance(blog_state, list):
+            seen_ids = [item for item in blog_state if item]
+            normalized[blog_id] = {
+                "seen_ids": seen_ids,
+                "summarized_posts": {},
+            }
+            continue
+
+        if isinstance(blog_state, dict):
+            seen_ids = blog_state.get("seen_ids", [])
+            summarized_posts = blog_state.get("summarized_posts", {})
+
+            # Support any earlier in-between shape that only stored a generic seen list.
+            if not seen_ids and isinstance(blog_state.get("seen"), list):
+                seen_ids = blog_state["seen"]
+
+            normalized[blog_id] = {
+                "seen_ids": [item for item in seen_ids if item],
+                "summarized_posts": summarized_posts
+                if isinstance(summarized_posts, dict) else {},
+            }
+
+    return normalized
+
+
+def get_blog_state(state: dict, blog_id: str) -> dict:
+    blog_state = state.get(blog_id)
+    if not isinstance(blog_state, dict):
+        blog_state = {"seen_ids": [], "summarized_posts": {}}
+        state[blog_id] = blog_state
+
+    blog_state.setdefault("seen_ids", [])
+    blog_state.setdefault("summarized_posts", {})
+    return blog_state
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -128,6 +186,30 @@ def get_rss_entries(blog_id: str) -> list:
     except Exception as exc:
         log.error("[%s] RSS fetch failed: %s", blog_id, exc)
         return []
+
+
+def entry_datetime(entry) -> Optional[datetime]:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        return datetime.fromtimestamp(time.mktime(parsed))
+
+    for key in ("published", "updated", "created"):
+        value = entry.get(key)
+        if not value:
+            continue
+        try:
+            dt = parsedate_to_datetime(value)
+            if dt.tzinfo:
+                return dt.astimezone().replace(tzinfo=None)
+            return dt
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def first_run_cutoff() -> datetime:
+    return datetime.now() - timedelta(days=FIRST_RUN_LOOKBACK_DAYS)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -192,9 +274,10 @@ def summarize(
     blog_id: str,
     prompt_template: str,
     gemini_key: str,
+    model_name: str,
 ) -> str:
     genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel(model_name)
 
     full_prompt = (
         f"{prompt_template}\n\n"
@@ -208,7 +291,7 @@ def summarize(
         response = model.generate_content(full_prompt)
         return response.text
     except Exception as exc:
-        log.error("Gemini summarization failed: %s", exc)
+        log.error("Summarization failed with model %s: %s", model_name, exc)
         return ""
 
 
@@ -278,11 +361,93 @@ def save_summary_file(
     return filepath
 
 
+def mark_seen(blog_state: dict, post_id: str):
+    if post_id and post_id not in blog_state["seen_ids"]:
+        blog_state["seen_ids"].append(post_id)
+
+
+def record_summary(
+    blog_state: dict,
+    post_id: str,
+    post_title: str,
+    post_url: str,
+    post_date: str,
+):
+    mark_seen(blog_state, post_id)
+    blog_state["summarized_posts"][post_id] = {
+        "title": post_title,
+        "url": post_url,
+        "post_date": post_date,
+        "summarized_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def should_skip_post(blog_state: dict, post_id: str) -> bool:
+    return post_id in set(blog_state["seen_ids"]) or post_id in blog_state["summarized_posts"]
+
+
+def summarize_entry(
+    entry,
+    blog_id: str,
+    prompt_template: str,
+    cfg: dict,
+    model_name: str,
+    send_to_telegram: bool = True,
+    blog_state: Optional[dict] = None,
+) -> bool:
+    post_id = entry.get("id", entry.get("link", ""))
+    post_title = entry.get("title", "Untitled")
+    post_link = entry.get("link", "")
+    post_date = entry.get("published", str(datetime.now()))
+
+    log.info("[%s] Summarizing post → %s", blog_id, post_title)
+
+    content = get_post_content(post_link)
+
+    if not content:
+        raw = entry.get("summary", entry.get("description", ""))
+        content = BeautifulSoup(raw, "lxml").get_text(separator="\n", strip=True)
+
+    if not content.strip():
+        log.warning("[%s] Empty content — skipping: %s", blog_id, post_title)
+        if blog_state is not None:
+            mark_seen(blog_state, post_id)
+        return False
+
+    summary = summarize(
+        content,
+        post_title,
+        blog_id,
+        prompt_template,
+        cfg["gemini_key"],
+        model_name,
+    )
+    if not summary:
+        log.warning("[%s] Summarization returned empty result.", blog_id)
+        return False
+
+    save_summary_file(blog_id, post_title, post_date, post_link, summary)
+
+    if send_to_telegram:
+        header = (
+            f"📰 *New Post — {blog_id}*\n"
+            f"*{post_title}*\n"
+            f"🗓 {post_date}\n"
+            f"🔗 {post_link}\n\n"
+        )
+        send_telegram(header + summary, cfg["tg_token"], cfg["tg_chat"])
+
+    if blog_state is not None:
+        record_summary(blog_state, post_id, post_title, post_link, post_date)
+
+    return True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Main scan logic
 # ══════════════════════════════════════════════════════════════════════════════
 
-def scan(backfill: bool = False):
+def scan(backfill: bool = False, model_name: Optional[str] = None):
     log.info("=" * 60)
     log.info("Naver Blog Scanner — starting run")
     log.info("=" * 60)
@@ -291,6 +456,7 @@ def scan(backfill: bool = False):
     state           = load_state()
     blogs           = load_blogs()
     prompt_template = PROMPT_FILE.read_text(encoding="utf-8")
+    model_name      = model_name or cfg["llm_model"]
 
     if not blogs:
         log.warning("No blog URLs found in blogs.txt — nothing to do.")
@@ -312,78 +478,98 @@ def scan(backfill: bool = False):
             continue
 
         is_first_run = blog_id not in state
-        seen: set = set(state.get(blog_id, []))
+        blog_state = get_blog_state(state, blog_id)
+        cutoff = first_run_cutoff()
 
-        # First run without --backfill → mark all existing posts as seen, skip.
         if is_first_run and not backfill:
-            all_ids = [e.get("id", e.get("link", "")) for e in entries]
-            log.info(
-                "[%s] First run — marking %d existing posts as seen "
-                "(use --backfill to summarize them too).",
-                blog_id, len(all_ids),
-            )
-            state[blog_id] = all_ids
+            older_count = 0
+            recent_candidates = 0
+            for entry in entries:
+                post_id = entry.get("id", entry.get("link", ""))
+                published_at = entry_datetime(entry)
+                if published_at and published_at < cutoff:
+                    mark_seen(blog_state, post_id)
+                    older_count += 1
+                else:
+                    recent_candidates += 1
+
             save_state(state)
-            continue
+            log.info(
+                "[%s] First run — limited scan to posts from the last %d days. "
+                "Marked %d older posts as seen and will process up to %d recent posts.",
+                blog_id,
+                FIRST_RUN_LOOKBACK_DAYS,
+                older_count,
+                recent_candidates,
+            )
 
         for entry in entries:
-            post_id    = entry.get("id", entry.get("link", ""))
-            post_title = entry.get("title", "Untitled")
-            post_link  = entry.get("link", "")
-            post_date  = entry.get("published", str(datetime.now()))
-
-            if post_id in seen:
+            post_id = entry.get("id", entry.get("link", ""))
+            if should_skip_post(blog_state, post_id):
                 continue
 
-            log.info("[%s] New post found → %s", blog_id, post_title)
-
-            # ── Get content ──────────────────────────────────────────────────
-            content = get_post_content(post_link)
-
-            if not content:
-                # Fall back to RSS description
-                raw = entry.get("summary", entry.get("description", ""))
-                content = BeautifulSoup(raw, "lxml").get_text(separator="\n", strip=True)
-
-            if not content.strip():
-                log.warning("[%s] Empty content — skipping: %s", blog_id, post_title)
-                seen.add(post_id)
-                state[blog_id] = list(seen)
-                save_state(state)
-                continue
-
-            # ── Summarize ────────────────────────────────────────────────────
-            summary = summarize(
-                content, post_title, blog_id, prompt_template, cfg["gemini_key"]
-            )
-            if not summary:
-                log.warning("[%s] Summarization returned empty result.", blog_id)
-                continue
-
-            # ── Save locally ─────────────────────────────────────────────────
-            save_summary_file(blog_id, post_title, post_date, post_link, summary)
-
-            # ── Send to Telegram ─────────────────────────────────────────────
-            header = (
-                f"📰 *New Post — {blog_id}*\n"
-                f"*{post_title}*\n"
-                f"🗓 {post_date}\n"
-                f"🔗 {post_link}\n\n"
-            )
-            send_telegram(header + summary, cfg["tg_token"], cfg["tg_chat"])
-
-            # ── Update state ─────────────────────────────────────────────────
-            seen.add(post_id)
-            state[blog_id] = list(seen)
+            if summarize_entry(
+                entry,
+                blog_id,
+                prompt_template,
+                cfg,
+                model_name,
+                send_to_telegram=True,
+                blog_state=blog_state,
+            ):
+                total_new += 1
             save_state(state)
-            total_new += 1
 
             time.sleep(3)   # polite delay between posts
 
     log.info("Run complete. New posts processed: %d", total_new)
 
 
-def watch(interval: int, backfill: bool = False):
+def test_run(model_name: Optional[str] = None):
+    log.info("=" * 60)
+    log.info("Naver Blog Scanner — starting test run")
+    log.info("=" * 60)
+
+    cfg = load_config()
+    blogs = load_blogs()
+    prompt_template = PROMPT_FILE.read_text(encoding="utf-8")
+    model_name = model_name or cfg["llm_model"]
+
+    if not blogs:
+        log.warning("No blog URLs found in blogs.txt — nothing to do.")
+        return
+
+    blog_url = random.choice(blogs)
+    blog_id = extract_blog_id(blog_url)
+    if not blog_id:
+        log.warning("Cannot parse blog ID from URL: %s", blog_url)
+        return
+
+    entries = get_rss_entries(blog_id)
+    if not entries:
+        log.warning("[%s] No RSS entries returned.", blog_id)
+        return
+
+    state = load_state()
+    blog_state = get_blog_state(state, blog_id)
+    candidates = [
+        entry for entry in entries
+        if not should_skip_post(blog_state, entry.get("id", entry.get("link", "")))
+    ]
+    entry = random.choice(candidates or entries)
+    log.info("[%s] Test run picked a random post from the feed.", blog_id)
+    summarize_entry(
+        entry,
+        blog_id,
+        prompt_template,
+        cfg,
+        model_name,
+        send_to_telegram=False,
+        blog_state=None,
+    )
+
+
+def watch(interval: int, backfill: bool = False, model_name: Optional[str] = None):
     """Run scans continuously until the user stops the process."""
     run_count = 0
     log.info("Watch mode started. Scan interval: %d seconds", interval)
@@ -394,7 +580,10 @@ def watch(interval: int, backfill: bool = False):
 
         # Only apply backfill to the first cycle so we do not repeatedly
         # reprocess old posts while the watcher stays up.
-        scan(backfill=backfill if run_count == 1 else False)
+        scan(
+            backfill=backfill if run_count == 1 else False,
+            model_name=model_name,
+        )
 
         log.info("Sleeping for %d seconds. Press Ctrl+C to stop.", interval)
         try:
@@ -418,8 +607,22 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "On first run, summarize ALL existing posts. "
-            "Default: mark them as seen and only summarize future new posts."
+            "Default: only summarize posts from the last 3 days."
         ),
+    )
+    run_parser.add_argument(
+        "--model",
+        default=None,
+        help=f"LLM model name override. Default comes from LLM_MODEL or {DEFAULT_MODEL}.",
+    )
+
+    test_parser = subparsers.add_parser(
+        "test", help="Summarize one random post from one blog without sending Telegram"
+    )
+    test_parser.add_argument(
+        "--model",
+        default=None,
+        help=f"LLM model name override. Default comes from LLM_MODEL or {DEFAULT_MODEL}.",
     )
 
     watch_parser = subparsers.add_parser(
@@ -439,6 +642,11 @@ if __name__ == "__main__":
         default=900,
         help="Seconds to wait between scans in watch mode. Default: 900",
     )
+    watch_parser.add_argument(
+        "--model",
+        default=None,
+        help=f"LLM model name override. Default comes from LLM_MODEL or {DEFAULT_MODEL}.",
+    )
 
     args = parser.parse_args()
     command = args.command or "run"
@@ -446,6 +654,8 @@ if __name__ == "__main__":
     if command == "watch":
         if args.interval < 60:
             parser.error("--interval must be at least 60 seconds")
-        watch(interval=args.interval, backfill=args.backfill)
+        watch(interval=args.interval, backfill=args.backfill, model_name=args.model)
+    elif command == "test":
+        test_run(model_name=args.model)
     else:
-        scan(backfill=args.backfill)
+        scan(backfill=args.backfill, model_name=args.model)
