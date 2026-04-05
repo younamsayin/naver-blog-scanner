@@ -65,6 +65,12 @@ CONTENT_CHAR_LIMIT=12000
 
 If a post is longer than that limit, the Telegram message will include a warning before the summary so you know it may not cover the full article.
 
+You can control how far back the first normal run will look before older posts are marked as already seen:
+
+```bash
+FIRST_RUN_LOOKBACK_DAYS=3
+```
+
 ## Run Modes
 
 - Run once immediately:
@@ -100,3 +106,7 @@ Do not use plain `python3 main.py ...` unless you have already activated the vir
 The scanner keeps `state.json` as a history of seen and summarized post IDs so it does not repeat the same post on future runs.
 
 On a blog's first normal run, it does not walk the entire history. It only considers posts from the last 3 days and marks older feed entries as already seen.
+
+## Launchd Example
+
+The committed [com.naverblogscanner.plist](/Users/eugeniasam/Desktop/code/naver-blog-scanner/com.naverblogscanner.plist) is now an example file with placeholder paths. If you want to use `launchd`, replace `/ABSOLUTE/PATH/TO/naver-blog-scanner` with your actual install path before loading it.

@@ -8,11 +8,12 @@
     <key>Label</key>
     <string>com.naverblogscanner</string>
 
-    <!-- Command to run: use the venv Python + main.py -->
+    <!-- Example command to run: replace /ABSOLUTE/PATH/TO with your install path -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/venv/bin/python3</string>
-        <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/main.py</string>
+        <string>/ABSOLUTE/PATH/TO/naver-blog-scanner/venv/bin/python3</string>
+        <string>/ABSOLUTE/PATH/TO/naver-blog-scanner/main.py</string>
+        <string>run</string>
     </array>
 
     <!-- Run every day at 9:00 AM local time -->
@@ -26,13 +27,13 @@
 
     <!-- Working directory -->
     <key>WorkingDirectory</key>
-    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner</string>
+    <string>/ABSOLUTE/PATH/TO/naver-blog-scanner</string>
 
     <!-- Log stdout and stderr to the same scanner.log file -->
     <key>StandardOutPath</key>
-    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/scanner.log</string>
+    <string>/ABSOLUTE/PATH/TO/naver-blog-scanner/scanner.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/eugeniasam/Desktop/code/naver-blog-scanner/scanner.log</string>
+    <string>/ABSOLUTE/PATH/TO/naver-blog-scanner/scanner.log</string>
 
     <!-- Restart automatically if the job crashes -->
     <key>KeepAlive</key>

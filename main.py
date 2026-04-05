@@ -20,6 +20,7 @@ import sys
 import re
 import json
 import time
+import calendar
 import logging
 import argparse
 import random
@@ -56,8 +57,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.0-flash"
-FIRST_RUN_LOOKBACK_DAYS = 3
 DEFAULT_CONTENT_CHAR_LIMIT = 12000
+DEFAULT_FIRST_RUN_LOOKBACK_DAYS = 3
 
 # ─── Mobile browser header ────────────────────────────────────────────────────
 HEADERS = {
@@ -81,6 +82,10 @@ def load_config() -> dict:
         "tg_chat":    os.getenv("TELEGRAM_CHAT_ID", ""),
         "llm_model":  os.getenv("LLM_MODEL", DEFAULT_MODEL),
         "content_char_limit": os.getenv("CONTENT_CHAR_LIMIT", str(DEFAULT_CONTENT_CHAR_LIMIT)),
+        "first_run_lookback_days": os.getenv(
+            "FIRST_RUN_LOOKBACK_DAYS",
+            str(DEFAULT_FIRST_RUN_LOOKBACK_DAYS),
+        ),
     }
     missing = [
         k for k in ("gemini_key", "tg_token", "tg_chat")
@@ -115,6 +120,24 @@ def load_config() -> dict:
             cfg["content_char_limit"],
         )
         sys.exit(1)
+
+    try:
+        cfg["first_run_lookback_days"] = int(cfg["first_run_lookback_days"])
+    except ValueError:
+        log.error(
+            "FIRST_RUN_LOOKBACK_DAYS in %s must be an integer. Current value: %r",
+            CONFIG_FILE,
+            cfg["first_run_lookback_days"],
+        )
+        sys.exit(1)
+
+    if cfg["first_run_lookback_days"] < 0:
+        log.error(
+            "FIRST_RUN_LOOKBACK_DAYS in %s must be 0 or greater. Current value: %r",
+            CONFIG_FILE,
+            cfg["first_run_lookback_days"],
+        )
+        sys.exit(1)
     return cfg
 
 
@@ -130,9 +153,19 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
+    serializable_state = {}
+    for blog_id, blog_state in state.items():
+        serializable_state[blog_id] = {
+            "seen_ids": list(blog_state.get("seen_ids", [])),
+            "summarized_posts": blog_state.get("summarized_posts", {}),
+        }
+
+    tmp_file = STATE_FILE.with_suffix(".tmp")
+    tmp_file.write_text(
+        json.dumps(serializable_state, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
+    tmp_file.replace(STATE_FILE)
 
 
 def normalize_state(raw_state: dict) -> dict:
@@ -149,12 +182,11 @@ def normalize_state(raw_state: dict) -> dict:
             continue
 
         if isinstance(blog_state, dict):
-            seen_ids = blog_state.get("seen_ids", [])
+            seen_ids = list({
+                *blog_state.get("seen_ids", []),
+                *blog_state.get("seen", []),
+            })
             summarized_posts = blog_state.get("summarized_posts", {})
-
-            # Support any earlier in-between shape that only stored a generic seen list.
-            if not seen_ids and isinstance(blog_state.get("seen"), list):
-                seen_ids = blog_state["seen"]
 
             normalized[blog_id] = {
                 "seen_ids": [item for item in seen_ids if item],
@@ -194,6 +226,10 @@ def extract_blog_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def get_post_id(entry) -> str:
+    return entry.get("id", entry.get("link", ""))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RSS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -211,7 +247,7 @@ def get_rss_entries(blog_id: str) -> list:
 def entry_datetime(entry) -> Optional[datetime]:
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if parsed:
-        return datetime.fromtimestamp(time.mktime(parsed))
+        return datetime.utcfromtimestamp(calendar.timegm(parsed))
 
     for key in ("published", "updated", "created"):
         value = entry.get(key)
@@ -228,15 +264,31 @@ def entry_datetime(entry) -> Optional[datetime]:
     return None
 
 
-def first_run_cutoff() -> datetime:
-    return datetime.now() - timedelta(days=FIRST_RUN_LOOKBACK_DAYS)
+def first_run_cutoff(lookback_days: int) -> datetime:
+    return datetime.now() - timedelta(days=lookback_days)
+
+
+def load_prompt_template() -> str:
+    if not PROMPT_FILE.exists():
+        log.error("prompt.md not found at %s — create it before running.", PROMPT_FILE)
+        sys.exit(1)
+    return PROMPT_FILE.read_text(encoding="utf-8")
+
+
+def create_http_session() -> requests.Session:
+    session = requests.Session()
+    return session
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Content scraping (mobile Naver)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_post_content(post_url: str) -> str:
+def get_post_content(
+    post_url: str,
+    session: requests.Session,
+    content_char_limit: int,
+) -> str:
     """
     Fetch the full text of a Naver blog post.
     Tries the mobile URL first (easier to parse), falls back to desktop.
@@ -249,7 +301,7 @@ def get_post_content(post_url: str) -> str:
         else:
             mobile_url = post_url.replace("blog.naver.com", "m.blog.naver.com")
 
-        resp = requests.get(mobile_url, headers=HEADERS, timeout=20)
+        resp = session.get(mobile_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
@@ -276,7 +328,7 @@ def get_post_content(post_url: str) -> str:
         if body:
             for junk in body.find_all(["script", "style", "nav", "header", "footer"]):
                 junk.decompose()
-            return body.get_text(separator="\n", strip=True)[:10_000]
+            return body.get_text(separator="\n", strip=True)[:content_char_limit]
 
     except Exception as exc:
         log.error("Content fetch failed for %s: %s", post_url, exc)
@@ -293,13 +345,9 @@ def summarize(
     title: str,
     blog_id: str,
     prompt_template: str,
-    gemini_key: str,
-    model_name: str,
     content_char_limit: int,
+    model,
 ) -> str:
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel(model_name)
-
     full_prompt = (
         f"{prompt_template}\n\n"
         f"[Source Data]\n"
@@ -312,7 +360,7 @@ def summarize(
         response = model.generate_content(full_prompt)
         return response.text
     except Exception as exc:
-        log.error("Summarization failed with model %s: %s", model_name, exc)
+        log.error("Summarization failed: %s", exc)
         return ""
 
 
@@ -323,7 +371,18 @@ def summarize(
 MAX_TG_CHARS = 4000   # Telegram hard limit is 4096; leave some headroom
 
 
-def send_telegram(text: str, token: str, chat_id: str):
+def safe_error_message(exc: Exception, secret: str) -> str:
+    if not secret:
+        return str(exc)
+    return str(exc).replace(secret, "***")
+
+
+def send_telegram(
+    text: str,
+    token: str,
+    chat_id: str,
+    session: requests.Session,
+):
     """Send a message to Telegram, splitting into chunks if it's too long."""
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
     chunks = [text[i : i + MAX_TG_CHARS] for i in range(0, len(text), MAX_TG_CHARS)]
@@ -336,15 +395,16 @@ def send_telegram(text: str, token: str, chat_id: str):
             if parse_mode:
                 payload["parse_mode"] = parse_mode
             try:
-                r = requests.post(api_url, json=payload, timeout=15)
+                r = session.post(api_url, json=payload, timeout=15)
                 r.raise_for_status()
                 sent = True
                 break
             except Exception as exc:
+                safe_msg = safe_error_message(exc, token)
                 if parse_mode:
-                    log.warning("Telegram Markdown send failed, retrying plain: %s", exc)
+                    log.warning("Telegram Markdown send failed, retrying plain: %s", safe_msg)
                 else:
-                    log.error("Telegram send failed: %s", exc)
+                    log.error("Telegram send failed: %s", safe_msg)
         if sent:
             time.sleep(0.5)   # short pause between chunks
 
@@ -404,7 +464,7 @@ def record_summary(
 
 
 def should_skip_post(blog_state: dict, post_id: str) -> bool:
-    return post_id in set(blog_state["seen_ids"]) or post_id in blog_state["summarized_posts"]
+    return post_id in blog_state["seen_ids"] or post_id in blog_state["summarized_posts"]
 
 
 def summarize_entry(
@@ -412,18 +472,19 @@ def summarize_entry(
     blog_id: str,
     prompt_template: str,
     cfg: dict,
-    model_name: str,
+    model,
+    session: requests.Session,
     send_to_telegram: bool = True,
     blog_state: Optional[dict] = None,
 ) -> bool:
-    post_id = entry.get("id", entry.get("link", ""))
+    post_id = get_post_id(entry)
     post_title = entry.get("title", "Untitled")
     post_link = entry.get("link", "")
     post_date = entry.get("published", str(datetime.now()))
 
     log.info("[%s] Summarizing post → %s", blog_id, post_title)
 
-    content = get_post_content(post_link)
+    content = get_post_content(post_link, session, cfg["content_char_limit"])
 
     if not content:
         raw = entry.get("summary", entry.get("description", ""))
@@ -443,9 +504,8 @@ def summarize_entry(
         post_title,
         blog_id,
         prompt_template,
-        cfg["gemini_key"],
-        model_name,
         content_char_limit,
+        model,
     )
     if not summary:
         log.warning("[%s] Summarization returned empty result.", blog_id)
@@ -466,7 +526,12 @@ def summarize_entry(
             f"🗓 {post_date}\n"
             f"🔗 {post_link}\n\n"
         )
-        send_telegram(header + truncation_note + summary, cfg["tg_token"], cfg["tg_chat"])
+        send_telegram(
+            header + truncation_note + summary,
+            cfg["tg_token"],
+            cfg["tg_chat"],
+            session,
+        )
 
     if blog_state is not None:
         record_summary(blog_state, post_id, post_title, post_link, post_date)
@@ -478,16 +543,31 @@ def summarize_entry(
 # Main scan logic
 # ══════════════════════════════════════════════════════════════════════════════
 
-def scan(backfill: bool = False, model_name: Optional[str] = None):
+def build_model(cfg: dict, model_name: Optional[str] = None):
+    selected_model = model_name or cfg["llm_model"]
+    genai.configure(api_key=cfg["gemini_key"])
+    return genai.GenerativeModel(selected_model)
+
+
+def scan(
+    backfill: bool = False,
+    model_name: Optional[str] = None,
+    cfg: Optional[dict] = None,
+    state: Optional[dict] = None,
+    prompt_template: Optional[str] = None,
+    model=None,
+    session: Optional[requests.Session] = None,
+):
     log.info("=" * 60)
     log.info("Naver Blog Scanner — starting run")
     log.info("=" * 60)
 
-    cfg             = load_config()
-    state           = load_state()
-    blogs           = load_blogs()
-    prompt_template = PROMPT_FILE.read_text(encoding="utf-8")
-    model_name      = model_name or cfg["llm_model"]
+    cfg = cfg or load_config()
+    state = state if state is not None else load_state()
+    blogs = load_blogs()
+    prompt_template = prompt_template or load_prompt_template()
+    session = session or create_http_session()
+    model = model or build_model(cfg, model_name)
 
     if not blogs:
         log.warning("No blog URLs found in blogs.txt — nothing to do.")
@@ -510,13 +590,13 @@ def scan(backfill: bool = False, model_name: Optional[str] = None):
 
         is_first_run = blog_id not in state
         blog_state = get_blog_state(state, blog_id)
-        cutoff = first_run_cutoff()
+        cutoff = first_run_cutoff(cfg["first_run_lookback_days"])
 
         if is_first_run and not backfill:
             older_count = 0
             recent_candidates = 0
             for entry in entries:
-                post_id = entry.get("id", entry.get("link", ""))
+                post_id = get_post_id(entry)
                 published_at = entry_datetime(entry)
                 if published_at and published_at < cutoff:
                     mark_seen(blog_state, post_id)
@@ -529,27 +609,38 @@ def scan(backfill: bool = False, model_name: Optional[str] = None):
                 "[%s] First run — limited scan to posts from the last %d days. "
                 "Marked %d older posts as seen and will process up to %d recent posts.",
                 blog_id,
-                FIRST_RUN_LOOKBACK_DAYS,
+                cfg["first_run_lookback_days"],
                 older_count,
                 recent_candidates,
             )
 
         for entry in entries:
-            post_id = entry.get("id", entry.get("link", ""))
+            post_id = get_post_id(entry)
             if should_skip_post(blog_state, post_id):
                 continue
 
-            if summarize_entry(
+            state_size_before = (
+                len(blog_state["seen_ids"]),
+                len(blog_state["summarized_posts"]),
+            )
+            result = summarize_entry(
                 entry,
                 blog_id,
                 prompt_template,
                 cfg,
-                model_name,
+                model,
+                session,
                 send_to_telegram=True,
                 blog_state=blog_state,
-            ):
+            )
+            if result:
                 total_new += 1
-            save_state(state)
+            state_size_after = (
+                len(blog_state["seen_ids"]),
+                len(blog_state["summarized_posts"]),
+            )
+            if state_size_after != state_size_before:
+                save_state(state)
 
             time.sleep(3)   # polite delay between posts
 
@@ -563,8 +654,9 @@ def test_run(model_name: Optional[str] = None):
 
     cfg = load_config()
     blogs = load_blogs()
-    prompt_template = PROMPT_FILE.read_text(encoding="utf-8")
-    model_name = model_name or cfg["llm_model"]
+    prompt_template = load_prompt_template()
+    session = create_http_session()
+    model = build_model(cfg, model_name)
 
     if not blogs:
         log.warning("No blog URLs found in blogs.txt — nothing to do.")
@@ -585,8 +677,14 @@ def test_run(model_name: Optional[str] = None):
     blog_state = get_blog_state(state, blog_id)
     candidates = [
         entry for entry in entries
-        if not should_skip_post(blog_state, entry.get("id", entry.get("link", "")))
+        if not should_skip_post(blog_state, get_post_id(entry))
     ]
+    if not candidates:
+        log.warning(
+            "[%s] All current feed entries have already been seen. "
+            "Test mode will re-summarize a random existing post.",
+            blog_id,
+        )
     entry = random.choice(candidates or entries)
     log.info("[%s] Test run picked a random post from the feed.", blog_id)
     summarize_entry(
@@ -594,7 +692,8 @@ def test_run(model_name: Optional[str] = None):
         blog_id,
         prompt_template,
         cfg,
-        model_name,
+        model,
+        session,
         send_to_telegram=True,
         blog_state=None,
     )
@@ -603,21 +702,29 @@ def test_run(model_name: Optional[str] = None):
 def watch(interval: int, backfill: bool = False, model_name: Optional[str] = None):
     """Run scans continuously until the user stops the process."""
     run_count = 0
+    cfg = load_config()
+    prompt_template = load_prompt_template()
+    session = create_http_session()
+    model = build_model(cfg, model_name)
     log.info("Watch mode started. Scan interval: %d seconds", interval)
 
     while True:
-        run_count += 1
-        log.info("Starting watch cycle #%d", run_count)
-
-        # Only apply backfill to the first cycle so we do not repeatedly
-        # reprocess old posts while the watcher stays up.
-        scan(
-            backfill=backfill if run_count == 1 else False,
-            model_name=model_name,
-        )
-
-        log.info("Sleeping for %d seconds. Press Ctrl+C to stop.", interval)
         try:
+            run_count += 1
+            log.info("Starting watch cycle #%d", run_count)
+
+            # Load the latest state each cycle so manual edits or previous runs are respected.
+            state = load_state()
+            scan(
+                backfill=backfill if run_count == 1 else False,
+                cfg=cfg,
+                state=state,
+                prompt_template=prompt_template,
+                model=model,
+                session=session,
+            )
+
+            log.info("Sleeping for %d seconds. Press Ctrl+C to stop.", interval)
             time.sleep(interval)
         except KeyboardInterrupt:
             log.info("Watch mode stopped by user.")

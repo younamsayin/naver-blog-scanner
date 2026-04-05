@@ -19,3 +19,9 @@ All notable changes to this project will be documented in this file.
 - Added configurable `CONTENT_CHAR_LIMIT` and a Telegram warning when a summary was generated from truncated post content.
 - Changed first normal run behavior to limit processing to posts from the last 3 days.
 - Expanded `state.json` handling to keep a durable history of summarized posts and upgrade older state files automatically.
+- Fixed UTC handling for RSS timestamps so first-run date filtering is correct outside UTC.
+- Fixed state migration to merge both `seen` and `seen_ids` entries instead of dropping one side.
+- Added a clear startup error when `prompt.md` is missing.
+- Reused the HTTP session and Gemini model across a run instead of rebuilding them for every post.
+- Made state writes atomic and masked the Telegram bot token in logged request errors.
+- Updated the sample launchd plist to use placeholder paths instead of a personal absolute path.
