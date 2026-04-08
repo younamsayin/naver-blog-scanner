@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_CONTENT_CHAR_LIMIT = 12000
 DEFAULT_FIRST_RUN_LOOKBACK_DAYS = 3
+DEFAULT_WATCH_INTERVAL_SECONDS = 900
 
 # ─── Mobile browser header ────────────────────────────────────────────────────
 HEADERS = {
@@ -85,6 +86,10 @@ def load_config() -> dict:
         "first_run_lookback_days": os.getenv(
             "FIRST_RUN_LOOKBACK_DAYS",
             str(DEFAULT_FIRST_RUN_LOOKBACK_DAYS),
+        ),
+        "watch_interval_seconds": os.getenv(
+            "WATCH_INTERVAL_SECONDS",
+            str(DEFAULT_WATCH_INTERVAL_SECONDS),
         ),
     }
     missing = [
@@ -136,6 +141,24 @@ def load_config() -> dict:
             "FIRST_RUN_LOOKBACK_DAYS in %s must be 0 or greater. Current value: %r",
             CONFIG_FILE,
             cfg["first_run_lookback_days"],
+        )
+        sys.exit(1)
+
+    try:
+        cfg["watch_interval_seconds"] = int(cfg["watch_interval_seconds"])
+    except ValueError:
+        log.error(
+            "WATCH_INTERVAL_SECONDS in %s must be an integer. Current value: %r",
+            CONFIG_FILE,
+            cfg["watch_interval_seconds"],
+        )
+        sys.exit(1)
+
+    if cfg["watch_interval_seconds"] < 60:
+        log.error(
+            "WATCH_INTERVAL_SECONDS in %s must be at least 60. Current value: %r",
+            CONFIG_FILE,
+            cfg["watch_interval_seconds"],
         )
         sys.exit(1)
     return cfg
@@ -699,10 +722,15 @@ def test_run(model_name: Optional[str] = None):
     )
 
 
-def watch(interval: int, backfill: bool = False, model_name: Optional[str] = None):
+def watch(
+    interval: Optional[int] = None,
+    backfill: bool = False,
+    model_name: Optional[str] = None,
+):
     """Run scans continuously until the user stops the process."""
     run_count = 0
     cfg = load_config()
+    interval = interval if interval is not None else cfg["watch_interval_seconds"]
     prompt_template = load_prompt_template()
     session = create_http_session()
     model = build_model(cfg, model_name)
@@ -777,8 +805,11 @@ if __name__ == "__main__":
     watch_parser.add_argument(
         "--interval",
         type=int,
-        default=900,
-        help="Seconds to wait between scans in watch mode. Default: 900",
+        default=None,
+        help=(
+            "Seconds to wait between scans in watch mode. "
+            "Overrides WATCH_INTERVAL_SECONDS from config.env."
+        ),
     )
     watch_parser.add_argument(
         "--model",
@@ -790,7 +821,7 @@ if __name__ == "__main__":
     command = args.command or "run"
 
     if command == "watch":
-        if args.interval < 60:
+        if args.interval is not None and args.interval < 60:
             parser.error("--interval must be at least 60 seconds")
         watch(interval=args.interval, backfill=args.backfill, model_name=args.model)
     elif command == "test":

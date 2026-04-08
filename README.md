@@ -71,6 +71,18 @@ You can control how far back the first normal run will look before older posts a
 FIRST_RUN_LOOKBACK_DAYS=3
 ```
 
+You can configure how often watch mode scans:
+
+```bash
+WATCH_INTERVAL_SECONDS=21600
+```
+
+`WATCH_INTERVAL_SECONDS=21600` means every 6 hours. You can still override the file value for a single run:
+
+```bash
+./venv/bin/python3 main.py watch --interval 600
+```
+
 ## Run Modes
 
 - Run once immediately:
@@ -86,6 +98,7 @@ FIRST_RUN_LOOKBACK_DAYS=3
 ```
 
 - Keep it running with a custom interval in seconds:
+- If you do not pass `--interval`, watch mode uses `WATCH_INTERVAL_SECONDS` from `config.env`.
 
 ```bash
 ./venv/bin/python3 main.py watch --interval 600

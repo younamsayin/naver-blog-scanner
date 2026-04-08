@@ -25,3 +25,4 @@ All notable changes to this project will be documented in this file.
 - Reused the HTTP session and Gemini model across a run instead of rebuilding them for every post.
 - Made state writes atomic and masked the Telegram bot token in logged request errors.
 - Updated the sample launchd plist to use placeholder paths instead of a personal absolute path.
+- Added `WATCH_INTERVAL_SECONDS` so watch-mode timing can be configured from `config.env`.
