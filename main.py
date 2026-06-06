@@ -406,30 +406,18 @@ def send_telegram(
     chat_id: str,
     session: requests.Session,
 ):
-    """Send a message to Telegram, splitting into chunks if it's too long."""
+    """Send a plain-text message to Telegram, splitting into chunks if needed."""
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
     chunks = [text[i : i + MAX_TG_CHARS] for i in range(0, len(text), MAX_TG_CHARS)]
 
     for chunk in chunks:
-        sent = False
-        # Try Markdown first, fall back to plain text
-        for parse_mode in ("Markdown", None):
-            payload: dict = {"chat_id": chat_id, "text": chunk}
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-            try:
-                r = session.post(api_url, json=payload, timeout=15)
-                r.raise_for_status()
-                sent = True
-                break
-            except Exception as exc:
-                safe_msg = safe_error_message(exc, token)
-                if parse_mode:
-                    log.warning("Telegram Markdown send failed, retrying plain: %s", safe_msg)
-                else:
-                    log.error("Telegram send failed: %s", safe_msg)
-        if sent:
+        payload: dict = {"chat_id": chat_id, "text": chunk}
+        try:
+            r = session.post(api_url, json=payload, timeout=15)
+            r.raise_for_status()
             time.sleep(0.5)   # short pause between chunks
+        except Exception as exc:
+            log.error("Telegram send failed: %s", safe_error_message(exc, token))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

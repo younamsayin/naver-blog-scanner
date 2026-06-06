@@ -26,3 +26,4 @@ All notable changes to this project will be documented in this file.
 - Made state writes atomic and masked the Telegram bot token in logged request errors.
 - Updated the sample launchd plist to use placeholder paths instead of a personal absolute path.
 - Added `WATCH_INTERVAL_SECONDS` so watch-mode timing can be configured from `config.env`.
+- Changed Telegram delivery to plain text only to avoid Markdown parse failures.
