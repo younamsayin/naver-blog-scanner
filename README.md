@@ -48,22 +48,24 @@ To process existing posts on the first run, use:
 You can choose the LLM model in either of two ways:
 
 ```bash
-LLM_MODEL=gemini-2.5-flash
+LLM_MODEL=gemini-3.5-flash
 ```
 
 or
 
 ```bash
-./venv/bin/python3 main.py run --model gemini-2.5-flash
+./venv/bin/python3 main.py run --model gemini-3.5-flash
 ```
 
 You can also control how much blog text is sent to the LLM:
 
 ```bash
-CONTENT_CHAR_LIMIT=12000
+CONTENT_CHAR_LIMIT=100000
 ```
 
-If a post is longer than that limit, the Telegram message will include a warning before the summary so you know it may not cover the full article.
+If a post is longer than that limit, the middle of the post is cut (the beginning and ending are kept, since conclusions usually live at the end) and the Telegram message will include a warning before the summary so you know it may not cover the full article.
+
+Up to 4 images from each post (charts, screenshots) are attached to the summarization request so the model can read data that only appears in images.
 
 You can control how far back the first normal run will look before older posts are marked as already seen:
 

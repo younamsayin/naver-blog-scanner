@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-07-17
+
+- Rewrote `prompt.md`: removed the leftover "video" wording, added a 핵심 요약 (TL;DR) section at the top, scaled sections to post substance (2-7 instead of a forced 6-7), capped quotes at 3 verbatim quotes under 20 words, pinned exact Korean headings for consistent output, and stated the investor audience.
+- Changed the default model to `gemini-3.5-flash` (full flash tier instead of `-lite`) and set `temperature=0.3` with a `max_output_tokens` backstop for more consistent structured summaries.
+- Added post images (up to 4 charts/screenshots per post) to the Gemini request so chart-only data can be summarized; stickers and emoticons are filtered out.
+- Marked Naver SE image captions as `[이미지 캡션: ...]` in the extracted text.
+- Changed truncation to keep head + tail of long posts instead of cutting off the conclusion, and raised `CONTENT_CHAR_LIMIT` to 100,000.
+- Added retry with backoff (3 attempts) for Gemini API failures.
+- Restored Telegram formatting via HTML parse mode: `**bold**` now renders as real bold, all content is escaped, and any chunk Telegram rejects is automatically re-sent as plain text.
+- Split long Telegram messages at newlines instead of mid-sentence.
+- Flagged and labeled full-page-scrape fallbacks so navigation noise is not summarized silently, and lowered the content-container threshold so short posts don't fall through to the noisy fallback.
+- Fixed the first-run lookback cutoff to compare timezone-aware UTC datetimes (was skewed by 9 hours on KST) and replaced deprecated `datetime.utcfromtimestamp`.
+- Capped per-blog state history at 200 entries so `state.json` stops growing forever.
+- Tagged the prior code as `pre-summary-improvements` for easy rollback.
+
 ## 2026-04-05
 
 - Added sample publish-safe files: `config.env.example` and `blogs.example.txt`.

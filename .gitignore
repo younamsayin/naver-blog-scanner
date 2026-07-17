@@ -6,3 +6,5 @@ summaries/
 venv/
 __pycache__/
 .DS_Store
+config.env.bak
+prompt.md.bak

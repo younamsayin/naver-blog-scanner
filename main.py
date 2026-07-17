@@ -24,7 +24,7 @@ import calendar
 import logging
 import argparse
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
@@ -56,10 +56,18 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.0-flash"
-DEFAULT_CONTENT_CHAR_LIMIT = 12000
+DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_CONTENT_CHAR_LIMIT = 100000
 DEFAULT_FIRST_RUN_LOOKBACK_DAYS = 3
 DEFAULT_WATCH_INTERVAL_SECONDS = 900
+
+GENERATION_CONFIG = {"temperature": 0.3, "max_output_tokens": 4096}
+SUMMARIZE_RETRY_DELAYS = (5, 15)   # seconds to wait before retry 2 and 3
+
+MAX_IMAGES_PER_POST = 4
+MAX_IMAGE_BYTES = 4_000_000
+
+MAX_STATE_ENTRIES = 200   # per-blog cap on seen_ids / summarized_posts history
 
 # ─── Mobile browser header ────────────────────────────────────────────────────
 HEADERS = {
@@ -178,9 +186,10 @@ def load_state() -> dict:
 def save_state(state: dict):
     serializable_state = {}
     for blog_id, blog_state in state.items():
+        summarized = blog_state.get("summarized_posts", {})
         serializable_state[blog_id] = {
-            "seen_ids": list(blog_state.get("seen_ids", [])),
-            "summarized_posts": blog_state.get("summarized_posts", {}),
+            "seen_ids": list(blog_state.get("seen_ids", []))[-MAX_STATE_ENTRIES:],
+            "summarized_posts": dict(list(summarized.items())[-MAX_STATE_ENTRIES:]),
         }
 
     tmp_file = STATE_FILE.with_suffix(".tmp")
@@ -268,9 +277,10 @@ def get_rss_entries(blog_id: str) -> list:
 
 
 def entry_datetime(entry) -> Optional[datetime]:
+    """Return the entry's publish time as an aware UTC datetime."""
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if parsed:
-        return datetime.utcfromtimestamp(calendar.timegm(parsed))
+        return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
 
     for key in ("published", "updated", "created"):
         value = entry.get(key)
@@ -278,9 +288,9 @@ def entry_datetime(entry) -> Optional[datetime]:
             continue
         try:
             dt = parsedate_to_datetime(value)
-            if dt.tzinfo:
-                return dt.astimezone().replace(tzinfo=None)
-            return dt
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
         except (TypeError, ValueError):
             continue
 
@@ -288,7 +298,7 @@ def entry_datetime(entry) -> Optional[datetime]:
 
 
 def first_run_cutoff(lookback_days: int) -> datetime:
-    return datetime.now() - timedelta(days=lookback_days)
+    return datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
 
 def load_prompt_template() -> str:
@@ -307,14 +317,63 @@ def create_http_session() -> requests.Session:
 # Content scraping (mobile Naver)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def mark_image_captions(el):
+    """Replace Naver SE caption blocks with tagged text so the LLM knows they belong to images."""
+    for cap in el.find_all(class_="se-caption"):
+        caption_text = cap.get_text(strip=True)
+        if caption_text:
+            cap.replace_with(f"\n[이미지 캡션: {caption_text}]\n")
+        else:
+            cap.decompose()
+
+
+def extract_image_urls(el) -> list:
+    """Collect up to MAX_IMAGES_PER_POST post-image URLs (charts, screenshots)."""
+    urls = []
+    for img in el.find_all("img"):
+        src = img.get("data-lazy-src") or img.get("src") or ""
+        if not src.startswith("http"):
+            continue
+        if "storep-phinf" in src:   # stickers / emoticons
+            continue
+        if not any(host in src for host in ("postfiles", "blogfiles", "phinf.pstatic.net")):
+            continue
+        # Swap lazy-load blur thumbnails for a readable resolution
+        src = re.sub(r"type=w\d+(_blur)?", "type=w966", src)
+        if src not in urls:
+            urls.append(src)
+        if len(urls) >= MAX_IMAGES_PER_POST:
+            break
+    return urls
+
+
+def download_images(urls: list, session: requests.Session) -> list:
+    """Download post images and return them as Gemini inline-data parts."""
+    images = []
+    for url in urls:
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            mime = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if not mime.startswith("image/") or mime == "image/gif":
+                continue
+            if len(resp.content) > MAX_IMAGE_BYTES:
+                continue
+            images.append({"mime_type": mime, "data": resp.content})
+        except Exception as exc:
+            log.warning("Image download failed for %s: %s", url, exc)
+    return images
+
+
 def get_post_content(
     post_url: str,
     session: requests.Session,
     content_char_limit: int,
-) -> str:
+) -> tuple:
     """
     Fetch the full text of a Naver blog post.
     Tries the mobile URL first (easier to parse), falls back to desktop.
+    Returns (text, image_urls).
     """
     try:
         # Build mobile URL
@@ -342,26 +401,51 @@ def get_post_content(
             if el:
                 for junk in el.find_all(["script", "style", "iframe", "button"]):
                     junk.decompose()
+                image_urls = extract_image_urls(el)
+                mark_image_captions(el)
                 text = el.get_text(separator="\n", strip=True)
-                if len(text) > 150:      # ignore tiny/empty containers
-                    return text
+                if len(text) > 50:      # ignore tiny/empty containers
+                    return text, image_urls
 
         # Last-resort: strip the whole body
         body = soup.find("body")
         if body:
+            log.warning(
+                "No known content container for %s — falling back to full-page scrape "
+                "(text may contain navigation noise).",
+                post_url,
+            )
             for junk in body.find_all(["script", "style", "nav", "header", "footer"]):
                 junk.decompose()
-            return body.get_text(separator="\n", strip=True)[:content_char_limit]
+            text = (
+                "[주의: 본문 추출이 불완전하여 메뉴/내비게이션 등 잡음이 섞여 있을 수 있습니다]\n"
+                + body.get_text(separator="\n", strip=True)[:content_char_limit]
+            )
+            return text, []
 
     except Exception as exc:
         log.error("Content fetch failed for %s: %s", post_url, exc)
 
-    return ""
+    return "", []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Gemini summarization
 # ══════════════════════════════════════════════════════════════════════════════
+
+def truncate_content(content: str, content_char_limit: int) -> str:
+    """Keep head + tail when truncating — Korean finance bloggers usually put the
+    conclusion at the end, so cutting only from the tail loses the takeaway."""
+    if len(content) <= content_char_limit:
+        return content
+    head = int(content_char_limit * 0.8)
+    tail = content_char_limit - head
+    return (
+        content[:head]
+        + "\n\n[...중략: 원문이 길어 중간 부분이 생략되었습니다...]\n\n"
+        + content[-tail:]
+    )
+
 
 def summarize(
     content: str,
@@ -370,21 +454,31 @@ def summarize(
     prompt_template: str,
     content_char_limit: int,
     model,
+    images: Optional[list] = None,
 ) -> str:
     full_prompt = (
         f"{prompt_template}\n\n"
         f"[Source Data]\n"
         f"Blog: {blog_id}\n"
         f"Title: {title}\n\n"
-        f"Content:\n{content[:content_char_limit]}"
+        f"Content:\n{truncate_content(content, content_char_limit)}"
     )
+    parts = [full_prompt] + list(images or [])
 
-    try:
-        response = model.generate_content(full_prompt)
-        return response.text
-    except Exception as exc:
-        log.error("Summarization failed: %s", exc)
-        return ""
+    attempts = len(SUMMARIZE_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            response = model.generate_content(
+                parts, generation_config=GENERATION_CONFIG
+            )
+            return response.text
+        except Exception as exc:
+            log.error(
+                "Summarization failed (attempt %d/%d): %s", attempt + 1, attempts, exc
+            )
+            if attempt < len(SUMMARIZE_RETRY_DELAYS):
+                time.sleep(SUMMARIZE_RETRY_DELAYS[attempt])
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -400,20 +494,53 @@ def safe_error_message(exc: Exception, secret: str) -> str:
     return str(exc).replace(secret, "***")
 
 
+def escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def markdown_to_telegram_html(text: str) -> str:
+    """Convert the LLM's **bold** markdown into Telegram HTML (with escaping)."""
+    text = escape_html(text)
+    return re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
+
+
+def strip_telegram_html(chunk: str) -> str:
+    """Fallback: turn a Telegram-HTML chunk back into readable plain text."""
+    plain = re.sub(r"</?b>", "", chunk)
+    return plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def split_message(text: str, limit: int) -> list:
+    """Split on the last newline before the limit so chunks don't cut mid-sentence."""
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind("\n", limit // 2, limit)
+        if cut == -1:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+
 def send_telegram(
     text: str,
     token: str,
     chat_id: str,
     session: requests.Session,
 ):
-    """Send a plain-text message to Telegram, splitting into chunks if needed."""
+    """Send a Telegram-HTML message, splitting into chunks if needed.
+    Falls back to plain text for any chunk Telegram rejects as bad HTML."""
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
-    chunks = [text[i : i + MAX_TG_CHARS] for i in range(0, len(text), MAX_TG_CHARS)]
 
-    for chunk in chunks:
-        payload: dict = {"chat_id": chat_id, "text": chunk}
+    for chunk in split_message(text, MAX_TG_CHARS):
+        payload: dict = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
         try:
             r = session.post(api_url, json=payload, timeout=15)
+            if r.status_code == 400:
+                payload = {"chat_id": chat_id, "text": strip_telegram_html(chunk)}
+                r = session.post(api_url, json=payload, timeout=15)
             r.raise_for_status()
             time.sleep(0.5)   # short pause between chunks
         except Exception as exc:
@@ -495,11 +622,12 @@ def summarize_entry(
 
     log.info("[%s] Summarizing post → %s", blog_id, post_title)
 
-    content = get_post_content(post_link, session, cfg["content_char_limit"])
+    content, image_urls = get_post_content(post_link, session, cfg["content_char_limit"])
 
     if not content:
         raw = entry.get("summary", entry.get("description", ""))
         content = BeautifulSoup(raw, "lxml").get_text(separator="\n", strip=True)
+        image_urls = []
 
     if not content.strip():
         log.warning("[%s] Empty content — skipping: %s", blog_id, post_title)
@@ -510,6 +638,10 @@ def summarize_entry(
     content_char_limit = cfg["content_char_limit"]
     was_truncated = len(content) > content_char_limit
 
+    images = download_images(image_urls, session)
+    if images:
+        log.info("[%s] Attaching %d post image(s) to the prompt.", blog_id, len(images))
+
     summary = summarize(
         content,
         post_title,
@@ -517,6 +649,7 @@ def summarize_entry(
         prompt_template,
         content_char_limit,
         model,
+        images=images,
     )
     if not summary:
         log.warning("[%s] Summarization returned empty result.", blog_id)
@@ -528,17 +661,17 @@ def summarize_entry(
         truncation_note = ""
         if was_truncated:
             truncation_note = (
-                "⚠️ *Partial-content summary:* the original post was longer than "
+                "⚠️ <b>Partial-content summary:</b> the original post was longer than "
                 f"{content_char_limit:,} characters, so the summary may not cover the full post.\n\n"
             )
         header = (
-            f"📰 *New Post — {blog_id}*\n"
-            f"*{post_title}*\n"
-            f"🗓 {post_date}\n"
-            f"🔗 {post_link}\n\n"
+            f"📰 <b>New Post — {escape_html(blog_id)}</b>\n"
+            f"<b>{escape_html(post_title)}</b>\n"
+            f"🗓 {escape_html(post_date)}\n"
+            f"🔗 {escape_html(post_link)}\n\n"
         )
         send_telegram(
-            header + truncation_note + summary,
+            header + truncation_note + markdown_to_telegram_html(summary),
             cfg["tg_token"],
             cfg["tg_chat"],
             session,
