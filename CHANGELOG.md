@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-07-23
+
+- Fixed truncated summaries: raised `max_output_tokens` from 4,096 to 16,384 and capped internal thinking at 4,096 tokens, so the model's reasoning can no longer consume the output budget and cut the summary mid-sentence.
+- Added a truncation guard: responses ending with `finish_reason=MAX_TOKENS` (or containing no text) now raise and go through the existing retry loop instead of being saved and sent half-finished.
+- Migrated from the deprecated `google-generativeai` SDK to `google-genai` (`genai.Client`, `types.GenerateContentConfig`, `types.Part.from_bytes` for images).
+- Silenced the new SDK's per-request HTTP log lines so `scanner.log` stays readable.
+
 ## 2026-07-17
 
 - Rewrote `prompt.md`: removed the leftover "video" wording, added a 핵심 요약 (TL;DR) section at the top, scaled sections to post substance (2-7 instead of a forced 6-7), capped quotes at 3 verbatim quotes under 20 words, pinned exact Korean headings for consistent output, and stated the investor audience.

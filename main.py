@@ -32,7 +32,8 @@ from typing import Optional
 import requests
 import feedparser
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -56,12 +57,23 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# The genai SDK logs every HTTP request at INFO — keep scanner.log readable.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+
 DEFAULT_MODEL = "gemini-3.5-flash"
 DEFAULT_CONTENT_CHAR_LIMIT = 100000
 DEFAULT_FIRST_RUN_LOOKBACK_DAYS = 3
 DEFAULT_WATCH_INTERVAL_SECONDS = 900
 
-GENERATION_CONFIG = {"temperature": 0.3, "max_output_tokens": 4096}
+# max_output_tokens includes the model's internal thinking tokens, so it needs
+# headroom well beyond the visible summary; thinking_budget caps the thinking
+# share so a hard post can't starve the output.
+GENERATION_CONFIG = types.GenerateContentConfig(
+    temperature=0.3,
+    max_output_tokens=16384,
+    thinking_config=types.ThinkingConfig(thinking_budget=4096),
+)
 SUMMARIZE_RETRY_DELAYS = (5, 15)   # seconds to wait before retry 2 and 3
 
 MAX_IMAGES_PER_POST = 4
@@ -359,7 +371,7 @@ def download_images(urls: list, session: requests.Session) -> list:
                 continue
             if len(resp.content) > MAX_IMAGE_BYTES:
                 continue
-            images.append({"mime_type": mime, "data": resp.content})
+            images.append(types.Part.from_bytes(data=resp.content, mime_type=mime))
         except Exception as exc:
             log.warning("Image download failed for %s: %s", url, exc)
     return images
@@ -463,15 +475,31 @@ def summarize(
         f"Title: {title}\n\n"
         f"Content:\n{truncate_content(content, content_char_limit)}"
     )
+    client, model_name = model
     parts = [full_prompt] + list(images or [])
 
     attempts = len(SUMMARIZE_RETRY_DELAYS) + 1
     for attempt in range(attempts):
         try:
-            response = model.generate_content(
-                parts, generation_config=GENERATION_CONFIG
+            response = client.models.generate_content(
+                model=model_name, contents=parts, config=GENERATION_CONFIG
             )
-            return response.text
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is None:
+                raise RuntimeError("response contained no candidates")
+            if candidate.finish_reason == types.FinishReason.MAX_TOKENS:
+                raise RuntimeError(
+                    "response truncated mid-output (finish_reason=MAX_TOKENS)"
+                )
+            content_parts = candidate.content.parts if candidate.content else None
+            text = "".join(
+                p.text for p in (content_parts or []) if p.text and not p.thought
+            )
+            if not text.strip():
+                raise RuntimeError(
+                    f"response contained no text (finish_reason={candidate.finish_reason})"
+                )
+            return text
         except Exception as exc:
             log.error(
                 "Summarization failed (attempt %d/%d): %s", attempt + 1, attempts, exc
@@ -687,10 +715,11 @@ def summarize_entry(
 # Main scan logic
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_model(cfg: dict, model_name: Optional[str] = None):
+def build_model(cfg: dict, model_name: Optional[str] = None) -> tuple:
+    """Return a (client, model_name) pair used by summarize()."""
     selected_model = model_name or cfg["llm_model"]
-    genai.configure(api_key=cfg["gemini_key"])
-    return genai.GenerativeModel(selected_model)
+    client = genai.Client(api_key=cfg["gemini_key"])
+    return client, selected_model
 
 
 def scan(
